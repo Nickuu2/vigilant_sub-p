@@ -1,0 +1,182 @@
+name: Background Queue Worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: background-queue-worker
+  cancel-in-progress: false
+
+jobs:
+  queue-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+
+    steps:
+      - name: Pre-Flight Configuration Check
+        shell: bash
+        env:
+          CORE_REPO: ${{ secrets.CORE_REPO }}
+          CORE_REPO_TOKEN: ${{ secrets.CORE_REPO_TOKEN }}
+          ACC_A_USER: ${{ secrets.ACC_A_USER }}
+          ACC_A_PASS: ${{ secrets.ACC_A_PASS }}
+          ACC_A_TOTP: ${{ secrets.ACC_A_TOTP }}
+          ACC_A_ADDR: ${{ secrets.ACC_A_ADDR }}
+          ACC_B_USER: ${{ secrets.ACC_B_USER }}
+          ACC_B_PASS: ${{ secrets.ACC_B_PASS }}
+          ACC_B_TOTP: ${{ secrets.ACC_B_TOTP }}
+          ACC_B_ADDR: ${{ secrets.ACC_B_ADDR }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CORE_REPO" ] || [ -z "$CORE_REPO_TOKEN" ]; then
+            echo "::error::Missing required repository secrets."
+            exit 1
+          fi
+
+      - name: Checkout Core Package
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.CORE_REPO }}
+          token: ${{ secrets.CORE_REPO_TOKEN }}
+          path: _worker
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Runtime Packages
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright playwright-stealth python-dotenv pyotp requests redis psutil pynacl
+
+      - name: Cache Browser Runtime
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-chromium-v1-${{ runner.os }}
+
+      - name: Install Browser Runtime
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          playwright install chromium
+
+      - name: Restore Worker State
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            _worker/worker_data.json
+            _worker/run_status.json
+            _worker/auth_state.json
+          key: queue-worker-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            queue-worker-state-v1-
+
+      - name: Run Queue Worker
+        working-directory: _worker
+        shell: bash
+        env:
+          CORE_REPO: ${{ secrets.CORE_REPO }}
+          CORE_REPO_TOKEN: ${{ secrets.CORE_REPO_TOKEN }}
+          ENTRY_SCRIPT: ${{ secrets.ENTRY_SCRIPT || 'queue_worker.py' }}
+          MAX_RUNTIME_HOURS: "5.2"
+          HEADLESS_MODE: "false"
+          USE_PROXY: "true"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          if [ ! -f ".env" ]; then
+            echo "::error::Missing .env file in private repository."
+            exit 1
+          fi
+          chmod 600 .env
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python -u "$ENTRY_SCRIPT"
+
+      - name: Save Worker State
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            _worker/worker_data.json
+            _worker/run_status.json
+            _worker/auth_state.json
+          key: queue-worker-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Prune Older Caches
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN || github.token }}
+        run: |
+          sleep 3
+          python - <<'PY'
+          import json, os, urllib.request
+          repo = "${{ github.repository }}"
+          token = os.environ.get("GH_TOKEN", "")
+          prefix = "queue-worker-state-v1-"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          try:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/actions/caches?per_page=100",
+                  headers=headers,
+              )
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  all_caches = json.loads(r.read().decode("utf-8")).get("actions_caches", [])
+              matched = [c for c in all_caches if str(c.get("key", "")).startswith(prefix)]
+              matched.sort(key=lambda c: str(c.get("created_at", "")), reverse=True)
+              print(f"Found {len(matched)} cache(s) for prefix {prefix}")
+              # Keep only the 1 newest cache; delete all older ones
+              deleted = 0
+              for c in matched[1:]:
+                  cid = c.get("id")
+                  if not cid:
+                      continue
+                  dreq = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/actions/caches/{cid}",
+                      headers=headers,
+                      method="DELETE",
+                  )
+                  try:
+                      urllib.request.urlopen(dreq, timeout=15).read()
+                      deleted += 1
+                  except Exception as exc:
+                      print(f"Could not delete cache {cid}: {exc}")
+              print(f"Pruned {deleted} older cache(s); kept {min(1, len(matched))} latest.")
+          except Exception as exc:
+              print(f"Cache prune skipped: {exc}")
+          PY
+
+      - name: Cleanup Workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf _worker
+
+      - name: Schedule Next Run
+        if: always() && !cancelled()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/worker_sync.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'
