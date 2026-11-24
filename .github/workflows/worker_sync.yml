@@ -78,7 +78,6 @@ jobs:
           path: |
             _worker/worker_data.json
             _worker/run_status.json
-            _worker/auth_state.json
           key: queue-worker-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             queue-worker-state-v1-
@@ -122,7 +121,6 @@ jobs:
           path: |
             _worker/worker_data.json
             _worker/run_status.json
-            _worker/auth_state.json
           key: queue-worker-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prune Older Caches
