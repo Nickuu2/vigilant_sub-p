@@ -89,6 +89,14 @@ jobs:
           CORE_REPO: ${{ secrets.CORE_REPO }}
           CORE_REPO_TOKEN: ${{ secrets.CORE_REPO_TOKEN }}
           ENTRY_SCRIPT: ${{ secrets.ENTRY_SCRIPT || 'queue_worker.py' }}
+          ACC_A_USER: ${{ secrets.ACC_A_USER }}
+          ACC_A_PASS: ${{ secrets.ACC_A_PASS }}
+          ACC_A_TOTP: ${{ secrets.ACC_A_TOTP }}
+          ACC_A_ADDR: ${{ secrets.ACC_A_ADDR }}
+          ACC_B_USER: ${{ secrets.ACC_B_USER }}
+          ACC_B_PASS: ${{ secrets.ACC_B_PASS }}
+          ACC_B_TOTP: ${{ secrets.ACC_B_TOTP }}
+          ACC_B_ADDR: ${{ secrets.ACC_B_ADDR }}
           MAX_RUNTIME_HOURS: "5.2"
           HEADLESS_MODE: "false"
           USE_PROXY: "true"
