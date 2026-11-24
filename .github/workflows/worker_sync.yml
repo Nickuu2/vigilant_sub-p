@@ -101,6 +101,18 @@ jobs:
             exit 1
           fi
           chmod 600 .env
+          # Strict network-route guardrail (verifies proxy config is present before launching browser)
+          python - <<'PY'
+          vals = {}
+          for line in open(".env", encoding="utf-8"):
+              s = line.strip()
+              if not s or s.startswith("#") or "=" not in s:
+                  continue
+              k, v = s.split("=", 1)
+              vals[k.strip()] = v.strip().strip('"').strip("'")
+          if vals.get("USE_PROXY", "").lower() not in ("true", "1", "yes") or not vals.get("PROXY_IP"):
+              raise SystemExit("Network route guard failed: proxy host missing in .env.")
+          PY
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python -u "$ENTRY_SCRIPT"
 
       - name: Save Worker State
